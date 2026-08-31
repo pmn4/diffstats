@@ -1,0 +1,104 @@
+#!/bin/zsh
+# diffstats - Visual git diff statistics
+# Shows code, test, and generated changes with axis-aligned visual bars
+
+from_ref=${1:-origin/main}
+to_ref=${2:---staged}
+
+git diff "$from_ref" "$to_ref" --numstat | awk '
+BEGIN {
+  code_add=0; code_del=0; test_add=0; test_del=0; generated_add=0; generated_del=0;
+  add_char="█";
+  del_char="▒";
+  bar_width=10;
+  labels[1] = "Code";
+  labels[2] = "Tests";
+  labels[3] = "Generated";
+}
+{
+  if ($3 ~ /generated\//) {
+    generated_add += $1; generated_del += $2
+  } else if ($3 ~ /\.(test|jest|stories|cy)\.|test_/) {
+    test_add += $1; test_del += $2
+  } else {
+    code_add += $1; code_del += $2
+  }
+}
+END {
+  # Calculate the range for scaling
+  max_add = code_add;
+  if (test_add > max_add) max_add = test_add;
+  if (generated_add > max_add) max_add = generated_add;
+  max_del = code_del;
+  if (test_del > max_del) max_del = test_del;
+  if (generated_del > max_del) max_del = generated_del;
+  range = max_add + max_del;
+
+  # Return early if there are no changes
+  if (range == 0) {
+    exit 0;
+  }
+
+  # Calculate width needed for formatting numbers
+  add_width = length(sprintf("%d", max_add));
+  del_width = length(sprintf("%d", max_del));
+
+  # Calculate blocks for visual bars
+  code_add_blocks = int((code_add * bar_width / range) + 0.5);
+  code_del_blocks = int((code_del * bar_width / range) + 0.5);
+  test_add_blocks = int((test_add * bar_width / range) + 0.5);
+  test_del_blocks = int((test_del * bar_width / range) + 0.5);
+  generated_add_blocks = int((generated_add * bar_width / range) + 0.5);
+  generated_del_blocks = int((generated_del * bar_width / range) + 0.5);
+
+  # Ensure at least one block if there are changes
+  if (code_add > 0 && code_add_blocks == 0) code_add_blocks = 1;
+  if (code_del > 0 && code_del_blocks == 0) code_del_blocks = 1;
+  if (test_add > 0 && test_add_blocks == 0) test_add_blocks = 1;
+  if (test_del > 0 && test_del_blocks == 0) test_del_blocks = 1;
+  if (generated_add > 0 && generated_add_blocks == 0) generated_add_blocks = 1;
+  if (generated_del > 0 && generated_del_blocks == 0) generated_del_blocks = 1;
+
+  # Find max label width for alignment
+  max_label_width = length(labels[1]);
+  for (i = 2; i <= 3; i++) if (length(labels[i]) > max_label_width) max_label_width = length(labels[i]);
+  max_label_width += 2; # for the bullet and space
+
+  # Find max add and del blocks for axis alignment
+  max_add_blocks = code_add_blocks;
+  if (test_add_blocks > max_add_blocks) max_add_blocks = test_add_blocks;
+  if (generated_add_blocks > max_add_blocks) max_add_blocks = generated_add_blocks;
+  max_del_blocks = code_del_blocks;
+  if (test_del_blocks > max_del_blocks) max_del_blocks = test_del_blocks;
+  if (generated_del_blocks > max_del_blocks) max_del_blocks = generated_del_blocks;
+
+  # Print Code row
+  pad_add = max_add_blocks - code_add_blocks;
+  pad_del = max_del_blocks - code_del_blocks;
+  bar = "";
+  for (i = 0; i < pad_add; i++) bar = bar " ";
+  for (i = 0; i < code_add_blocks; i++) bar = bar add_char;
+  for (i = 0; i < code_del_blocks; i++) bar = bar del_char;
+  for (i = 0; i < pad_del; i++) bar = bar " ";
+  printf("• %-*s%s (%+*d, %*d)\n", max_label_width, labels[1], bar, add_width+1, code_add, del_width+1, -1 * code_del);
+
+  # Print Tests row
+  pad_add = max_add_blocks - test_add_blocks;
+  pad_del = max_del_blocks - test_del_blocks;
+  bar = "";
+  for (i = 0; i < pad_add; i++) bar = bar " ";
+  for (i = 0; i < test_add_blocks; i++) bar = bar add_char;
+  for (i = 0; i < test_del_blocks; i++) bar = bar del_char;
+  for (i = 0; i < pad_del; i++) bar = bar " ";
+  printf("• %-*s%s (%+*d, %*d)\n", max_label_width, labels[2], bar, add_width+1, test_add, del_width+1, -1 * test_del);
+
+  # Print Generated row
+  pad_add = max_add_blocks - generated_add_blocks;
+  pad_del = max_del_blocks - generated_del_blocks;
+  bar = "";
+  for (i = 0; i < pad_add; i++) bar = bar " ";
+  for (i = 0; i < generated_add_blocks; i++) bar = bar add_char;
+  for (i = 0; i < generated_del_blocks; i++) bar = bar del_char;
+  for (i = 0; i < pad_del; i++) bar = bar " ";
+  printf("• %-*s%s (%+*d, %*d)\n", max_label_width, labels[3], bar, add_width+1, generated_add, del_width+1, -1 * generated_del);
+}' from_ref="$from_ref" to_ref="$to_ref"

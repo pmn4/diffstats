@@ -1,0 +1,136 @@
+#!/bin/zsh
+# teamdifffiles - Show changed files grouped by CODEOWNERS teams and categorized by code vs tests
+
+from_ref=${1:-origin/main}
+to_ref=${2:---staged}
+
+# Constants
+UNOWNED_TEAM="(unowned)"
+
+# Read CODEOWNERS file and build team mapping
+declare -A team_files
+declare -a sorted_patterns
+current_team=""
+
+while IFS= read -r line; do
+    # Skip comments and empty lines
+    [[ $line =~ ^#.*$ ]] && continue
+    [[ -z $line ]] && continue
+
+    # Check if line starts with a path pattern
+    if [[ $line =~ ^/ ]]; then
+        # Extract path pattern and team
+        path_pattern=$(echo "$line" | awk '{print $1}')
+        team=$(echo "$line" | awk '{print $2}')
+        
+        # Remove @ symbol from team name
+        team=${team#@}
+        
+        # Remove leading slash from path pattern
+        path_pattern=${path_pattern#/}
+        
+        # Store the mapping
+        team_files[$path_pattern]=$team
+        
+        # Add pattern to array for sorting
+        sorted_patterns+=("$path_pattern")
+    fi
+done < .github/CODEOWNERS
+
+# Sort patterns by depth (number of path components) in descending order
+# this allows us to use a first-match-wins approach
+sorted_patterns=($(for pattern in "${sorted_patterns[@]}"; do
+    depth=$(echo "$pattern" | tr -cd '/' | wc -c)
+    echo "$depth:$pattern"
+done | sort -nr -t: -k1 | cut -d: -f2))
+
+# Function to determine team for a file
+get_team() {
+    local file=$1
+    local team=$UNOWNED_TEAM
+    
+    # Convert glob patterns to regex patterns
+    for pattern in "${sorted_patterns[@]}"; do
+        # Escape special regex characters
+        regex_pattern=${pattern//\*/.*}
+        regex_pattern=${regex_pattern//\?/.}
+        regex_pattern=${regex_pattern//\//\\/}
+        
+        if [[ $file =~ ^$regex_pattern ]]; then
+            team=${team_files[$pattern]}
+            break
+        fi
+    done
+    
+    echo "$team"
+}
+
+# Process git diff output
+declare -A team_code_files
+declare -A team_test_files
+
+# Use process substitution to handle the pipe in zsh
+while read -r file; do
+    # Skip empty lines
+    [[ -z $file ]] && continue
+    
+    # Get team for this file
+    team=$(get_team "$file")
+    
+    # Initialize arrays if they don't exist
+    if [[ -z ${team_code_files[$team]} ]]; then
+        team_code_files[$team]=""
+    fi
+    if [[ -z ${team_test_files[$team]} ]]; then
+        team_test_files[$team]=""
+    fi
+    
+    # Add file to appropriate array based on file type
+    if [[ $file =~ (\.(test|jest|stories|cy)\.) ]]; then
+        team_test_files[$team]+="$file"$'\n'
+    else
+        team_code_files[$team]+="$file"$'\n'
+    fi
+done < <(git diff --name-only "$from_ref" "$to_ref")
+
+# Create array of teams sorted by total files, with unowned at the end
+sorted_teams=()
+unowned_team=""
+for team in "${(@k)team_code_files}"; do
+    total_files=$(($(echo "${team_code_files[$team]}" | wc -l) + $(echo "${team_test_files[$team]}" | wc -l)))
+    if [[ $team == $UNOWNED_TEAM ]]; then
+        unowned_team="$total_files:$team"
+    else
+        sorted_teams+=("$total_files:$team")
+    fi
+done
+sorted_teams=(${(On)sorted_teams})  # Sort numerically in descending order
+sorted_teams=(${sorted_teams#*:})   # Remove the numeric prefix
+if [[ -n $unowned_team ]]; then
+    sorted_teams+=($UNOWNED_TEAM)  # Add unowned at the end
+fi
+
+# Print results
+for team in "${sorted_teams[@]}"; do
+    header="Team: $team"
+    echo "$header"
+    echo "${(l:${#header}::-:)}"
+    
+    # Print code files
+    if [[ -n "${team_code_files[$team]}" ]]; then
+        # Count files by counting non-empty lines
+        code_count=$(echo "${team_code_files[$team]}" | grep -c '^[^[:space:]]')
+        echo "Code Files ($code_count):"
+        echo "${team_code_files[$team]}" | sed 's/^/  /'
+    fi
+    
+    # Print test files
+    if [[ -n "${team_test_files[$team]}" ]]; then
+        # Count files by counting non-empty lines
+        test_count=$(echo "${team_test_files[$team]}" | grep -c '^[^[:space:]]')
+        echo "Test Files ($test_count):"
+        echo "${team_test_files[$team]}" | sed 's/^/  /'
+    fi
+
+    # do not print a blank line after each team
+done
