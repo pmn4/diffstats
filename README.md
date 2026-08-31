@@ -123,6 +123,10 @@ Three overrides exist because a name-based heuristic cannot see intent:
 These are judgement calls, and they are four `case` arms in one function if you
 disagree.
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 ## History
 
 The first commit imports the scripts as they ran for nine months, so
