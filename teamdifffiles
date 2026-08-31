@@ -4,133 +4,109 @@
 from_ref=${1:-origin/main}
 to_ref=${2:---staged}
 
+emulate -L zsh
+setopt extended_glob
+
 # Constants
 UNOWNED_TEAM="(unowned)"
 
-# Read CODEOWNERS file and build team mapping
-declare -A team_files
-declare -a sorted_patterns
-current_team=""
+# Ownership and classification are shared with teamdiffstats / diffstats via the
+# library, so the team headings here match the required-reviewer list on the PR:
+# last-matching-rule-wins, every owner on the winning rule credited, gitignore
+# path-component matching, owner-less rules remove ownership.
+#
+# The parser this replaced took only the FIRST owner on a rule, skipped rules
+# not starting with `/`, and picked the deepest match rather than the last one.
+_lib=${0:A:h}/lib/changestats.zsh
+if [[ ! -r $_lib ]]; then
+    print -u2 "teamdifffiles: missing library at $_lib"
+    exit 1
+fi
+source $_lib
 
-while IFS= read -r line; do
-    # Skip comments and empty lines
-    [[ $line =~ ^#.*$ ]] && continue
-    [[ -z $line ]] && continue
-
-    # Check if line starts with a path pattern
-    if [[ $line =~ ^/ ]]; then
-        # Extract path pattern and team
-        path_pattern=$(echo "$line" | awk '{print $1}')
-        team=$(echo "$line" | awk '{print $2}')
-        
-        # Remove @ symbol from team name
-        team=${team#@}
-        
-        # Remove leading slash from path pattern
-        path_pattern=${path_pattern#/}
-        
-        # Store the mapping
-        team_files[$path_pattern]=$team
-        
-        # Add pattern to array for sorting
-        sorted_patterns+=("$path_pattern")
-    fi
-done < .github/CODEOWNERS
-
-# Sort patterns by depth (number of path components) in descending order
-# this allows us to use a first-match-wins approach
-sorted_patterns=($(for pattern in "${sorted_patterns[@]}"; do
-    depth=$(echo "$pattern" | tr -cd '/' | wc -c)
-    echo "$depth:$pattern"
-done | sort -nr -t: -k1 | cut -d: -f2))
-
-# Function to determine team for a file
-get_team() {
-    local file=$1
-    local team=$UNOWNED_TEAM
-    
-    # Convert glob patterns to regex patterns
-    for pattern in "${sorted_patterns[@]}"; do
-        # Escape special regex characters
-        regex_pattern=${pattern//\*/.*}
-        regex_pattern=${regex_pattern//\?/.}
-        regex_pattern=${regex_pattern//\//\\/}
-        
-        if [[ $file =~ ^$regex_pattern ]]; then
-            team=${team_files[$pattern]}
-            break
-        fi
-    done
-    
-    echo "$team"
-}
+codeowners_load .github/CODEOWNERS
 
 # Process git diff output
 declare -A team_code_files
 declare -A team_test_files
+declare -A team_gen_files
+declare -A seen_team
 
-# Use process substitution to handle the pipe in zsh
+_add_file() {  # _add_file <team> <kind> <file>
+    seen_team[$1]=1
+    case $2 in
+        (test)      team_test_files[$1]+="$3"$'\n' ;;
+        (generated) team_gen_files[$1]+="$3"$'\n' ;;
+        (*)         team_code_files[$1]+="$3"$'\n' ;;
+    esac
+}
+
+typeset -i n_files=0
 while read -r file; do
     # Skip empty lines
     [[ -z $file ]] && continue
-    
-    # Get team for this file
-    team=$(get_team "$file")
-    
-    # Initialize arrays if they don't exist
-    if [[ -z ${team_code_files[$team]} ]]; then
-        team_code_files[$team]=""
-    fi
-    if [[ -z ${team_test_files[$team]} ]]; then
-        team_test_files[$team]=""
-    fi
-    
-    # Add file to appropriate array based on file type
-    if [[ $file =~ (\.(test|jest|stories|cy)\.) ]]; then
-        team_test_files[$team]+="$file"$'\n'
+    (( n_files++ ))
+
+    kind=$(classify_path $file)
+    owners=($(codeowners_for $file))
+
+    # A file with several owners is listed under each of them, because each one
+    # is separately on the hook for reviewing it.
+    if (( ${#owners} == 0 )); then
+        _add_file $UNOWNED_TEAM $kind $file
     else
-        team_code_files[$team]+="$file"$'\n'
+        for owner in $owners; do
+            _add_file ${owner#@} $kind $file
+        done
     fi
 done < <(git diff --name-only "$from_ref" "$to_ref")
 
-# Create array of teams sorted by total files, with unowned at the end
-sorted_teams=()
-unowned_team=""
-for team in "${(@k)team_code_files}"; do
-    total_files=$(($(echo "${team_code_files[$team]}" | wc -l) + $(echo "${team_test_files[$team]}" | wc -l)))
-    if [[ $team == $UNOWNED_TEAM ]]; then
-        unowned_team="$total_files:$team"
-    else
-        sorted_teams+=("$total_files:$team")
-    fi
+(( n_files )) || exit 0
+
+_count_files() { print -rn -- "$1" | grep -c '[^[:space:]]' }
+
+# Sort teams by file count descending, name ascending for a stable tie-break.
+# The old version keyed an associative array by "count:team", which collapsed
+# teams that happened to share a count.
+sorted_rows=()
+for team in "${(@k)seen_team}"; do
+    [[ $team == $UNOWNED_TEAM ]] && continue
+    total_files=$((
+        $(_count_files "${team_code_files[$team]}") +
+        $(_count_files "${team_test_files[$team]}") +
+        $(_count_files "${team_gen_files[$team]}")
+    ))
+    sorted_rows+=("$total_files	$team")
 done
-sorted_teams=(${(On)sorted_teams})  # Sort numerically in descending order
-sorted_teams=(${sorted_teams#*:})   # Remove the numeric prefix
-if [[ -n $unowned_team ]]; then
-    sorted_teams+=($UNOWNED_TEAM)  # Add unowned at the end
-fi
+sorted_rows=(${(f)"$(print -rl -- $sorted_rows | sort -t$'\t' -k1,1nr -k2,2)"})
+sorted_teams=()
+for row in $sorted_rows; do
+    [[ -n $row ]] && sorted_teams+=("${row#*$'\t'}")
+done
+(( ${+seen_team[$UNOWNED_TEAM]} )) && sorted_teams+=($UNOWNED_TEAM)
+
+_print_section() {  # _print_section <label> <blob>
+    [[ -n $2 ]] || return 0
+    print -r -- "$1 ($(_count_files "$2")):"
+    print -rn -- "$2" | sed 's/^/  /'
+}
 
 # Print results
+typeset -i first=1
 for team in "${sorted_teams[@]}"; do
-    header="Team: $team"
-    echo "$header"
-    echo "${(l:${#header}::-:)}"
-    
-    # Print code files
-    if [[ -n "${team_code_files[$team]}" ]]; then
-        # Count files by counting non-empty lines
-        code_count=$(echo "${team_code_files[$team]}" | grep -c '^[^[:space:]]')
-        echo "Code Files ($code_count):"
-        echo "${team_code_files[$team]}" | sed 's/^/  /'
-    fi
-    
-    # Print test files
-    if [[ -n "${team_test_files[$team]}" ]]; then
-        # Count files by counting non-empty lines
-        test_count=$(echo "${team_test_files[$team]}" | grep -c '^[^[:space:]]')
-        echo "Test Files ($test_count):"
-        echo "${team_test_files[$team]}" | sed 's/^/  /'
-    fi
+    (( first )) || print -r -- ""
+    first=0
 
-    # do not print a blank line after each team
+    header="Team: $team"
+    print -r -- "$header"
+    print -r -- "${(l:${#header}::-:)}"
+
+    _print_section "Code Files"      "${team_code_files[$team]}"
+    _print_section "Test Files"      "${team_test_files[$team]}"
+    _print_section "Generated Files" "${team_gen_files[$team]}"
 done
+
+if (( ${#sorted_teams} > 1 )); then
+    print -r -- ""
+    print -r -- "A file with several owners is listed under each of them."
+fi

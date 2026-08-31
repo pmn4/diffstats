@@ -5,7 +5,27 @@
 from_ref=${1:-origin/main}
 to_ref=${2:---staged}
 
-git diff "$from_ref" "$to_ref" --numstat | awk '
+# The code/test/generated split is shared with teamdiffstats. It used to be an
+# inline regex duplicated in both scripts, and the copies drifted far enough to
+# disagree on ~1,400 files.
+_lib=${0:A:h}/lib/changestats.zsh
+if [[ ! -r $_lib ]]; then
+  print -u2 "diffstats: missing library at $_lib"
+  exit 1
+fi
+source $_lib
+
+# Emit "added <TAB> deleted <TAB> class" so awk only has to total and render.
+_classified() {
+  local added deleted file
+  while read -r added deleted file; do
+    [[ -z $file ]] && continue
+    [[ $added == '-' || $deleted == '-' ]] && continue   # binary
+    print -r -- "$added	$deleted	$(classify_path $file)"
+  done < <(git diff "$from_ref" "$to_ref" --numstat)
+}
+
+_classified | awk '
 BEGIN {
   code_add=0; code_del=0; test_add=0; test_del=0; generated_add=0; generated_del=0;
   add_char="█";
@@ -16,9 +36,9 @@ BEGIN {
   labels[3] = "Generated";
 }
 {
-  if ($3 ~ /generated\//) {
+  if ($3 == "generated") {
     generated_add += $1; generated_del += $2
-  } else if ($3 ~ /\.(test|jest|stories|cy)\.|test_/) {
+  } else if ($3 == "test") {
     test_add += $1; test_del += $2
   } else {
     code_add += $1; code_del += $2

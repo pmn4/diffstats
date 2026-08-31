@@ -1,176 +1,137 @@
 #!/bin/zsh
-# teamdiffstats - Visual git diff statistics by team
-# Shows code and test changes with visual bars, grouped by team
+# teamdiffstats - git diff statistics grouped by CODEOWNERS team.
+#
+# PURPOSE
+# When GitHub lists a team as a required reviewer on a PR, that team should be
+# able to find its own row here and see how much of the diff belongs to it.
+# So the set of team rows is built to equal GitHub's required-reviewer set:
+# last-matching-rule-wins, every owner on the winning rule credited, gitignore
+# path-component matching. See lib/changestats.zsh for the semantics.
+#
+# A file with several owners is counted in full for each of them, because each
+# one is separately on the hook for reviewing it. Team rows therefore overlap
+# and can sum to more than the TOTAL row. TOTAL counts each line exactly once
+# and reconciles with `git diff --numstat`.
+#
+# Usage: teamdiffstats [from_ref] [to_ref]
+
+emulate -L zsh
+setopt extended_glob
 
 from_ref=${1:-origin/main}
 to_ref=${2:---staged}
 
-# Constants
-UNOWNED_TEAM="(unowned)"
+_lib=${0:A:h}/lib/changestats.zsh
+if [[ ! -r $_lib ]]; then
+  print -u2 "teamdiffstats: missing library at $_lib"
+  exit 1
+fi
+source $_lib
 
-# Read CODEOWNERS file and build team mapping
-declare -A team_files
-declare -a sorted_patterns
-current_team=""
+UNOWNED="(unowned)"
+TOTAL_LABEL="TOTAL (each line once)"
 
-while IFS= read -r line; do
-    # Skip comments and empty lines
-    [[ $line =~ ^#.*$ ]] && continue
-    [[ -z $line ]] && continue
+codeowners_load .github/CODEOWNERS
 
-    # Check if line starts with a path pattern
-    if [[ $line =~ ^/ ]]; then
-        # Extract path pattern and team
-        path_pattern=$(echo "$line" | awk '{print $1}')
-        team=$(echo "$line" | awk '{print $2}')
-        
-        # Remove @ symbol from team name
-        team=${team#@}
-        
-        # Remove leading slash from path pattern
-        path_pattern=${path_pattern#/}
-        
-        # Store the mapping
-        team_files[$path_pattern]=$team
-        
-        # Add pattern to array for sorting
-        sorted_patterns+=("$path_pattern")
-    fi
-done < .github/CODEOWNERS
+typeset -A code_add code_del test_add test_del
+typeset -i tot_code_add=0 tot_code_del=0 tot_test_add=0 tot_test_del=0
 
-# Sort patterns by depth (number of path components) in descending order
-# this allows us to use a first-match-wins approach
-sorted_patterns=($(for pattern in "${sorted_patterns[@]}"; do
-    depth=$(echo "$pattern" | tr -cd '/' | wc -c)
-    echo "$depth:$pattern"
-done | sort -nr -t: -k1 | cut -d: -f2))
-
-# Function to determine team for a file
-get_team() {
-    local file=$1
-    local team=$UNOWNED_TEAM
-    
-    # Convert glob patterns to regex patterns
-    for pattern in "${sorted_patterns[@]}"; do
-        # Escape special regex characters
-        regex_pattern=${pattern//\*/.*}
-        regex_pattern=${regex_pattern//\?/.}
-        regex_pattern=${regex_pattern//\//\\/}
-        
-        if [[ $file =~ ^$regex_pattern ]]; then
-            team=${team_files[$pattern]}
-            break
-        fi
-    done
-    
-    echo "$team"
+_bump() {  # _bump <team> <kind> <added> <deleted>
+  local t=$1 kind=$2
+  local -i a=$3 d=$4
+  if [[ $kind == test ]]; then
+    (( test_add[$t] += a, test_del[$t] += d ))
+  else
+    (( code_add[$t] += a, code_del[$t] += d ))
+  fi
+  # Ensure the team appears even if its only lines are on the other axis.
+  : ${code_add[$t]=0} ${code_del[$t]=0} ${test_add[$t]=0} ${test_del[$t]=0}
 }
 
-# Process git diff output
-declare -A team_stats
-declare -A team_test_stats
-
-# Use process substitution to handle the pipe in zsh
 while read -r added deleted file; do
-    # Skip empty lines
-    [[ -z $file ]] && continue
-    
-    # Get team for this file
-    team=$(get_team "$file")
-    
-    # Initialize team stats if not exists
-    [[ -z ${team_stats[$team]} ]] && team_stats[$team]="0 0"
-    [[ -z ${team_test_stats[$team]} ]] && team_test_stats[$team]="0 0"
-    
-    # Split current stats
-    read -r code_add code_del <<< "${team_stats[$team]}"
-    read -r test_add test_del <<< "${team_test_stats[$team]}"
-    
-    # Update stats based on file type
-    if [[ $file =~ (\.(test|jest|stories|cy)\.|test_/) ]]; then
-        test_add=$((test_add + added))
-        test_del=$((test_del + deleted))
-        team_test_stats[$team]="$test_add $test_del"
-    else
-        code_add=$((code_add + added))
-        code_del=$((code_del + deleted))
-        team_stats[$team]="$code_add $code_del"
-    fi
+  [[ -z $file ]] && continue
+  # Binary files report "-" for both counts.
+  [[ $added == '-' || $deleted == '-' ]] && continue
+
+  kind=$(classify_path $file)
+  # `generated` is reported by diffstats but carries no authorship credit, so it
+  # is excluded from team rows and from TOTAL here.
+  [[ $kind == generated ]] && continue
+
+  if [[ $kind == test ]]; then
+    (( tot_test_add += added, tot_test_del += deleted ))
+  else
+    (( tot_code_add += added, tot_code_del += deleted ))
+  fi
+
+  owners=($(codeowners_for $file))
+  if (( ${#owners} == 0 )); then
+    _bump $UNOWNED $kind $added $deleted
+  else
+    for owner in $owners; do
+      _bump ${owner#@} $kind $added $deleted
+    done
+  fi
 done < <(git diff "$from_ref" "$to_ref" --numstat)
 
-# Calculate max values for scaling and column widths
-max_team_length=0
-max_code_add_length=0
-max_code_del_length=0
-max_test_add_length=0
-max_test_del_length=0
+# Nothing to report. Callers (the prepare-commit-msg hook) treat empty output as
+# "skip the stats block".
+(( ${#code_add} )) || exit 0
 
-# First pass to get max lengths of actual formatted strings
-for team in "${(@k)team_stats}"; do
-    read -r code_add code_del <<< "${team_stats[$team]}"
-    read -r test_add test_del <<< "${team_test_stats[$team]}"
-    
-    # Format numbers temporarily to get their actual string lengths
-    code_add_str=$(printf "%+d" $code_add)
-    code_del_str=$(printf "%d" $((-$code_del)))
-    test_add_str=$(printf "%+d" $test_add)
-    test_del_str=$(printf "%d" $((-$test_del)))
-    
-    # Update max lengths based on actual formatted strings
-    [[ ${#team} -gt $max_team_length ]] && max_team_length=${#team}
-    [[ ${#code_add_str} -gt $max_code_add_length ]] && max_code_add_length=${#code_add_str}
-    [[ ${#code_del_str} -gt $max_code_del_length ]] && max_code_del_length=${#code_del_str}
-    [[ ${#test_add_str} -gt $max_test_add_length ]] && max_test_add_length=${#code_add_str}
-    [[ ${#test_del_str} -gt $max_test_del_length ]] && max_test_del_length=${#code_del_str}
+# --- ordering: teams by total lines touched, descending; unowned last --------
+typeset -a ordered
+for t in ${(k)code_add}; do
+  [[ $t == $UNOWNED ]] && continue
+  ordered+=("$(( code_add[$t] + code_del[$t] + test_add[$t] + test_del[$t] ))	$t")
+done
+ordered=(${(f)"$(print -rl -- $ordered | sort -t$'\t' -k1,1nr -k2,2)"})
+typeset -a teams
+for row in $ordered; do teams+=("${row#*$'\t'}"); done
+(( ${+code_add[$UNOWNED]} )) && teams+=("$UNOWNED")
+
+# --- column widths ----------------------------------------------------------
+_fmt_pair() {  # _fmt_pair <added> <deleted> <addw> <delw>
+  printf "(%+*d, %*d)" $3 $1 $4 $(( -$2 ))
+}
+
+typeset -i w_team=${#TOTAL_LABEL} w_ca=1 w_cd=1 w_ta=1 w_td=1
+for t in $teams; do
+  (( ${#t} > w_team )) && w_team=${#t}
+done
+_w() {  # widest formatted integer across teams + total
+  local -i m=1 v
+  for v in $@; do (( ${#v} > m )) && m=${#v}; done
+  print $m
+}
+w_ca=$(_w ${(v)code_add} $tot_code_add)
+w_cd=$(_w ${(v)code_del} $tot_code_del)
+w_ta=$(_w ${(v)test_add} $tot_test_add)
+w_td=$(_w ${(v)test_del} $tot_test_del)
+# +1 in every column leaves room for the sign printf adds ('+' on additions,
+# '-' on deletions). Without it the rule line is shorter than the widest row.
+(( w_ca++, w_ta++, w_cd++, w_td++ ))
+
+typeset -i w_code=$(( w_ca + w_cd + 4 )) w_test=$(( w_ta + w_td + 4 ))
+
+# --- render -----------------------------------------------------------------
+printf "%-*s  %-*s %-*s\n" $w_team "Team" $w_code "Code" $w_test "Tests"
+printf "%-*s  %-*s %-*s\n" \
+  $w_team "${(l:w_team::-:)}" $w_code "${(l:w_code::-:)}" $w_test "${(l:w_test::-:)}"
+
+for t in $teams; do
+  printf "%-*s  %s %s\n" $w_team "$t" \
+    "$(_fmt_pair ${code_add[$t]} ${code_del[$t]} $w_ca $w_cd)" \
+    "$(_fmt_pair ${test_add[$t]} ${test_del[$t]} $w_ta $w_td)"
 done
 
-# Calculate column widths
-team_width=$((max_team_length + 2))
-code_width=$((max_code_add_length + max_code_del_length + 4))  # +4 for "(, )" and spacing
-test_width=$((max_test_add_length + max_test_del_length + 4))
+printf "%-*s  %-*s %-*s\n" \
+  $w_team "${(l:w_team::-:)}" $w_code "${(l:w_code::-:)}" $w_test "${(l:w_test::-:)}"
+printf "%-*s  %s %s\n" $w_team "$TOTAL_LABEL" \
+  "$(_fmt_pair $tot_code_add $tot_code_del $w_ca $w_cd)" \
+  "$(_fmt_pair $tot_test_add $tot_test_del $w_ta $w_td)"
 
-# Create array of teams sorted by total code changes, with unowned at the end
-sorted_teams=()
-unowned_team=""
-for team in "${(@k)team_stats}"; do
-    read -r code_add code_del <<< "${team_stats[$team]}"
-    total_changes=$((code_add + code_del))
-    if [[ $team == $UNOWNED_TEAM ]]; then
-        unowned_team="$total_changes:$team"
-    else
-        sorted_teams+=("$total_changes:$team")
-    fi
-done
-sorted_teams=(${(On)sorted_teams})  # Sort numerically in descending order
-sorted_teams=(${sorted_teams#*:})   # Remove the numeric prefix
-if [[ -n $unowned_team ]]; then
-    sorted_teams+=($UNOWNED_TEAM)  # Add unowned at the end
+# Only worth saying when it can actually be observed.
+if (( ${#teams} > 1 )); then
+  print -r -- ""
+  print -r -- "A file with several owners counts for each of them, so team rows can exceed TOTAL."
 fi
-
-# Print header
-printf "%-${team_width}s %-${code_width}s %-${test_width}s\n" \
-    "Team" "Code" "Tests"
-printf "%-${team_width}s %-${code_width}s %-${test_width}s\n" \
-    "$(printf "%${max_team_length}s" | tr ' ' '-')" \
-    "$(printf "%${code_width}s" | tr ' ' '-')" \
-    "$(printf "%${test_width}s" | tr ' ' '-')"
-
-# Print stats for each team
-for team in "${sorted_teams[@]}"; do
-    read -r code_add code_del <<< "${team_stats[$team]}"
-    read -r test_add test_del <<< "${team_test_stats[$team]}"
-    
-    # Format numbers with consistent spacing and right-aligned deletions
-    code_add_str=$(printf "%+${max_code_add_length}d" $code_add)
-    code_del_str=$(printf "%${max_code_del_length}d" $((-$code_del)))
-    test_add_str=$(printf "%+${max_test_add_length}d" $test_add)
-    test_del_str=$(printf "%${max_test_del_length}d" $((-$test_del)))
-    
-    # Print team stats with parentheses and commas
-    printf "%-${team_width}s (%s, %s) (%s, %s)\n" \
-        "$team" \
-        "$code_add_str" \
-        "$code_del_str" \
-        "$test_add_str" \
-        "$test_del_str"
-done
