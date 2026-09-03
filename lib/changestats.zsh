@@ -67,12 +67,27 @@ classify_path() {
 
   # --- generated -----------------------------------------------------------
   # Recorded or machine-emitted content. Authorship credit does not apply.
+  # Lockfiles matter most here: a dependency bump rewrites thousands of lines
+  # that nobody reads, and counting them as code drowns out the real change.
   case $f in
-    (generated/*|*/generated/*) print generated; return ;;
-    (cassettes/*|*/cassettes/*) print generated; return ;;
+    (generated/*|*/generated/*)         print generated; return ;;
+    (__generated__/*|*/__generated__/*) print generated; return ;;
+    (cassettes/*|*/cassettes/*)         print generated; return ;;
+    (dist/*|*/dist/*)                   print generated; return ;;
+    (build/*|*/build/*)                 print generated; return ;;
+    (out/*|*/out/*)                     print generated; return ;;
+    (coverage/*|*/coverage/*)           print generated; return ;;
   esac
   case $base in
-    (*.snap) print generated; return ;;
+    (*.snap)                        print generated; return ;;
+    (pnpm-lock.yaml|yarn.lock)      print generated; return ;;
+    (package-lock.json)             print generated; return ;;
+    (Gemfile.lock|poetry.lock)      print generated; return ;;
+    (Cargo.lock|composer.lock)      print generated; return ;;
+    (*.min.js|*.min.css)            print generated; return ;;
+    (*.pb.go|*_pb2.py|*.g.dart)     print generated; return ;;
+    (*.gen.[a-zA-Z0-9]##)           print generated; return ;;
+    (*.generated.*)                 print generated; return ;;
   esac
 
   # --- support -------------------------------------------------------------
@@ -107,6 +122,10 @@ classify_path() {
     (__tests__/*|*/__tests__/*) print test; return ;;
     (__test__/*|*/__test__/*)   print test; return ;;
     (cypress/*|*/cypress/*)     print test; return ;;
+    (e2e/*|*/e2e/*)             print test; return ;;
+    (spec/*|*/spec/*)           print test; return ;;
+    (fixtures/*|*/fixtures/*)   print test; return ;;
+    (fixture/*|*/fixture/*)     print test; return ;;
   esac
 
   # --- production surfaces that read like tests ----------------------------
@@ -120,9 +139,10 @@ classify_path() {
 
   # --- test basenames ------------------------------------------------------
   case $base in
-    (conftest.py)       print test; return ;;
-    (test_*.py)         print test; return ;;
-    (*_test.py)         print test; return ;;
+    (conftest.py)                    print test; return ;;
+    (test_*.py)                      print test; return ;;
+    (*_test.py|*_test.go|*_test.rb)  print test; return ;;
+    (*_spec.rb)                      print test; return ;;
   esac
   # Frontend conventions. These scripts run across several repositories, and the
   # convention is not the same in each. Measured across four real ones:

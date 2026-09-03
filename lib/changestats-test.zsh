@@ -83,6 +83,41 @@ typeset -a cases=(
   "frontend/libs/i18n/src/locales/en/core.ts|code"
   "app/domains/foo/mock.py|code"
   "app/domains/foo/product_area_registry.py|code"
+  # --- generated: lockfiles and build output ---
+  # A dependency bump rewrites thousands of lines nobody reads.
+  "pnpm-lock.yaml|generated"
+  "frontend/pnpm-lock.yaml|generated"
+  "package-lock.json|generated"
+  "yarn.lock|generated"
+  "Gemfile.lock|generated"
+  "poetry.lock|generated"
+  "Cargo.lock|generated"
+  "composer.lock|generated"
+  "dist/index.js|generated"
+  "frontend/libs/x/dist/index.js|generated"
+  "build/main.css|generated"
+  "out/server.js|generated"
+  "coverage/lcov.info|generated"
+  "src/__generated__/schema.ts|generated"
+  "src/api.gen.ts|generated"
+  "src/api.generated.ts|generated"
+  "static/app.min.js|generated"
+  "static/app.min.css|generated"
+  "proto/service.pb.go|generated"
+  "proto/service_pb2.py|generated"
+  "lib/models.g.dart|generated"
+  # Not generated: a lockfile-adjacent name that a human maintains.
+  "packages/x/package.json|code"
+  "src/generator.ts|code"
+  "src/rebuild.ts|code"
+  # --- test: conventions beyond Python/JS ---
+  "e2e/checkout.ts|test"
+  "frontend/e2e/login.ts|test"
+  "spec/models/user_spec.rb|test"
+  "internal/server/handler_test.go|test"
+  "app/models/user_test.rb|test"
+  "app/domains/x/fixtures/payload.json|test"
+  "app/domains/x/fixture/payload.json|test"
 )
 for c in $cases; do
   local p=${c%%|*} want=${c##*|}
