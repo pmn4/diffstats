@@ -7,7 +7,7 @@ required reviewer on this PR — how much of it is actually mine?*
 
 | Command | Answers |
 | --- | --- |
-| `diffstats` | How much of this diff is code, tests, generated? |
+| `diffstats` | How much of this diff is code, tests, support, generated? |
 | `teamdiffstats` | How many lines does each owning team have? |
 | `teamdifffiles` | Which specific files does each owning team have? |
 
@@ -16,13 +16,19 @@ tree. They must run from the repository root, because ownership is read from
 `./.github/CODEOWNERS`.
 
 ```console
+$ diffstats origin/main HEAD
+• Code            █████▒ ( +565, -1)
+• Tests              ██  ( +280,  0)
+• Support             █  ( +113,  0)
+• Generated  ██████████  (+1158,  0)
+
 $ teamdiffstats origin/main HEAD
-Team                    Code       Tests
-----------------------  ---------- ----------
-acme-org/team-alpha     (+414,  0) (+274,  0)
-(unowned)               (+151, -1) (  +6,  0)
-----------------------  ---------- ----------
-TOTAL (each line once)  (+565, -1) (+280,  0)
+Team                    Code       Tests      Support
+----------------------  ---------- ---------- ----------
+acme-org/team-alpha     (+414,  0) (+274,  0) ( +97,  0)
+(unowned)               (+151, -1) (  +6,  0) ( +16,  0)
+----------------------  ---------- ---------- ----------
+TOTAL (each line once)  (+565, -1) (+280,  0) (+113,  0)
 ```
 
 ## The ownership model
@@ -49,10 +55,10 @@ with `git diff --numstat`.
 
 ```console
 $ zsh lib/changestats-test.zsh
-PASS=317 FAIL=0
+PASS=336 FAIL=0
 ```
 
-317 assertions covering classification, pattern translation, and precedence.
+336 assertions covering classification, pattern translation, and precedence.
 252 of them are differential tests against `git check-ignore`, which implements
 gitignore matching natively and serves as an independent oracle — scoped to
 patterns without a trailing wildcard, where the two standards agree.
@@ -96,32 +102,66 @@ so a hook can treat empty output as "skip the stats block".
 
 ## Classification
 
-`classify_path` sorts each file into `code`, `test`, or `generated`. The rules
-are deliberately explicit rather than clever, because the convention differs
-per repository — one repo used `.test.*` exclusively, another `.spec.*`
+`classify_path` sorts each file into one of four classes. Priority is
+`generated` > `support` > `test` > `code`, and `code` is the fallback: an
+unrecognised path is treated as something a human must read line by line.
+
+| Class | Means | Signals |
+| --- | --- | --- |
+| `generated` | Machine-emitted. Nobody authored it, nobody reviews it. | `generated/` and `cassettes/` components, `*.snap` |
+| `support` | Scaffolding a reviewer skims for intent. | `.storybook/` and `__mocks__/` components, `*.stories.*`, `*.mock.*`, `locale(s)/**.json`, `*.po`, `*.pot`, `CODEOWNERS`, `product_area(s).yml` |
+| `test` | Assertions about behaviour. | `tests/`, `test/`, `__tests__/`, `__test__/`, `cypress/` components; `conftest.py`, `test_*.py`, `*_test.py`; `*.test.*`, `*.spec.*`, `*.cy.*` |
+| `code` | Production surface. | Everything else |
+
+The rules are deliberately explicit rather than clever, because the convention
+differs per repository — one repo used `.test.*` exclusively, another `.spec.*`
 exclusively.
-
-Test signals: any `tests/`, `test/`, `__tests__/`, `__test__/` or `cypress/`
-path component; `conftest.py`, `test_*.py`, `*_test.py`; and `*.test.*`,
-`*.spec.*`, `*.cy.*`, `*.stories.*` restricted to source extensions.
-
-Generated: `generated/` and `cassettes/` components, and `*.snap`.
 
 Extension lists are explicit so that build configuration such as
 `tsconfig.spec.json` and `vitest.config.ts` stays code. Note for future edits:
 zsh's `?` is any-single-char, **not** an optional quantifier — write `ts(x|)` or
 `(ts|tsx)`, never `ts(x)?`.
 
-Three overrides exist because a name-based heuristic cannot see intent:
+### Why `support` is separate
+
+A reviewer does read a test, to judge whether the coverage is any good. A
+reviewer skims a Storybook story. Both are non-production, so the old two-way
+split put them together and let one drown out the other.
+
+The cost of that is measurable. On one real PR whose production change was two
+files, a single 87-line `*.stories.tsx` was enough to carry the diff from 175
+credited lines to 262 — across a 250-line "high complexity" threshold in a
+downstream review-time estimator. Storybook, i18n catalogues and ownership
+metadata all share that shape: high line count, near-zero reading cost.
+
+Two cheaper options were considered and rejected. Folding them into `test`
+makes a two-test PR report six test files, and reads i18n and `CODEOWNERS` as
+tests. Folding them into `generated` claims nobody wrote them, when a
+hand-written story can be wrong.
+
+`support` beats `test` in priority because `Button.stories.tsx` sits next to
+`Button.test.tsx` under one `__tests__/` directory in some layouts. `generated`
+beats `support` because a machine-written snapshot can also match a support
+pattern, and it belongs in the cheapest bucket.
+
+`teamdiffstats` gives `support` its own credited column rather than dropping it
+the way it drops `generated`: a human wrote it and the owning team is still on
+the hook, but a team whose whole share is scaffolding has a much smaller reading
+job than its line count suggests.
+
+### Overrides
+
+These exist because a name-based heuristic cannot see intent:
 
 | Pattern | Class | Why |
 | --- | --- | --- |
 | `**/test_data/` | code | A production seeding surface, not a test |
 | `send_test_*`, `create_test_*`, `delete_test_*`, `seed_test_*` | code | Production entry points that send test payloads |
 | `factories/` | code | Test-data factories are test support, but production factories share the name |
+| `migrations/` | code | Mostly autogenerated, but exactly the thing a reviewer must read carefully |
 
-These are judgement calls, and they are four `case` arms in one function if you
-disagree.
+These are judgement calls, and they are a handful of `case` arms in one function
+if you disagree.
 
 ## License
 

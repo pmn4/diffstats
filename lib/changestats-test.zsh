@@ -37,7 +37,6 @@ typeset -a cases=(
   "app/domains/circuit_breaker/scripts/circuit_breaker_test.py|test"
   "frontend/libs/foo/Bar.test.tsx|test"
   "frontend/libs/foo/Bar.cy.ts|test"
-  "frontend/libs/foo/Bar.stories.tsx|test"
   "frontend/eslint/vitest.config.ts|code"
   "frontend/libs/x/tsconfig.spec.json|code"
   "src/worker/dispatch.spec.ts|test"
@@ -51,10 +50,36 @@ typeset -a cases=(
   "generated/schema.ts|generated"
   "frontend/libs/x/__snapshots__/a.snap|generated"
   "migrations/versions/c9a1f4b83d27_create_feature_alpha_pilot_tables.py|code"
-  "product_areas.yml|code"
   "app/domains/feature_alpha/factories/feature_alpha_day.py|code"
   "cypress/e2e/login.cy.ts|test"
   "app/domains/marketplace/tests/fixtures.py|test"
+  # --- support ---
+  "frontend/libs/foo/Bar.stories.tsx|support"
+  "frontend/libs/foo/Bar.stories.mdx|support"
+  "frontend/.storybook/main.ts|support"
+  "frontend/libs/foo/__mocks__/api.ts|support"
+  "frontend/libs/foo/api.mock.ts|support"
+  "frontend/libs/i18n/src/locales/en/core.json|support"
+  "locale/de.json|support"
+  "translations/messages.po|support"
+  "translations/messages.pot|support"
+  ".github/CODEOWNERS|support"
+  "CODEOWNERS|support"
+  "product_areas.yml|support"
+  "app/domains/feature_alpha/product_area.yml|support"
+  # `support` beats `test`: a story under a tests/ component is still a story,
+  # and a hand-written double is scaffolding rather than an assertion.
+  "frontend/libs/foo/__tests__/Bar.stories.tsx|support"
+  "tests/frontend/__mocks__/api.ts|support"
+  # `generated` still beats `support`.
+  "generated/Bar.stories.tsx|generated"
+  # Support patterns are extension-scoped for the same reason the test ones are:
+  # a `.storybook`-adjacent name must not swallow production code.
+  "frontend/libs/foo/stories.ts|code"
+  "frontend/libs/foo/Bar.stories.json|code"
+  "frontend/libs/i18n/src/locales/en/core.ts|code"
+  "app/domains/foo/mock.py|code"
+  "app/domains/foo/product_area_registry.py|code"
 )
 for c in $cases; do
   local p=${c%%|*} want=${c##*|}

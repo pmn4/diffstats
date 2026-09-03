@@ -31,21 +31,39 @@ source $_lib
 UNOWNED="(unowned)"
 TOTAL_LABEL="TOTAL (each line once)"
 
+# One column per credited class, in report order. `generated` is reported by
+# diffstats but carries no authorship credit, so it has no column and no team.
+# `support` does: a human wrote the story or the string catalogue, and the owning
+# team is still on the hook for it. It gets its own column rather than being
+# folded into Code, because a team whose whole share is support scaffolding has a
+# much smaller reading job than the line count suggests.
+typeset -a CLASSES=(code test support)
+typeset -A CLASS_LABEL=(code "Code" test "Tests" support "Support")
+
 codeowners_load .github/CODEOWNERS
 
-typeset -A code_add code_del test_add test_del
-typeset -i tot_code_add=0 tot_code_del=0 tot_test_add=0 tot_test_del=0
+# Keyed "<class>|<team>". One flat pair of maps rather than a pair per class, so
+# adding a class is a CLASSES entry and nothing else. Keys are built into a
+# variable first: an associative subscript inside (( )) is read as arithmetic,
+# and `|` there is bitwise-or, not a separator.
+typeset -A add del
+typeset -A tot_add tot_del
+typeset -A seen_team
+for c in $CLASSES; do tot_add[$c]=0 tot_del[$c]=0; done
 
-_bump() {  # _bump <team> <kind> <added> <deleted>
-  local t=$1 kind=$2
+_bump() {  # _bump <team> <class> <added> <deleted>
+  local t=$1 c=$2 k
   local -i a=$3 d=$4
-  if [[ $kind == test ]]; then
-    (( test_add[$t] += a, test_del[$t] += d ))
-  else
-    (( code_add[$t] += a, code_del[$t] += d ))
-  fi
-  # Ensure the team appears even if its only lines are on the other axis.
-  : ${code_add[$t]=0} ${code_del[$t]=0} ${test_add[$t]=0} ${test_del[$t]=0}
+  k="$c|$t"
+  add[$k]=$(( ${add[$k]:-0} + a ))
+  del[$k]=$(( ${del[$k]:-0} + d ))
+  # Ensure the team appears even if its only lines are in another class.
+  seen_team[$t]=1
+  local other
+  for other in $CLASSES; do
+    k="$other|$t"
+    : ${add[$k]=0} ${del[$k]=0}
+  done
 }
 
 while read -r added deleted file; do
@@ -54,15 +72,10 @@ while read -r added deleted file; do
   [[ $added == '-' || $deleted == '-' ]] && continue
 
   kind=$(classify_path $file)
-  # `generated` is reported by diffstats but carries no authorship credit, so it
-  # is excluded from team rows and from TOTAL here.
   [[ $kind == generated ]] && continue
 
-  if [[ $kind == test ]]; then
-    (( tot_test_add += added, tot_test_del += deleted ))
-  else
-    (( tot_code_add += added, tot_code_del += deleted ))
-  fi
+  tot_add[$kind]=$(( ${tot_add[$kind]:-0} + added ))
+  tot_del[$kind]=$(( ${tot_del[$kind]:-0} + deleted ))
 
   owners=($(codeowners_for $file))
   if (( ${#owners} == 0 )); then
@@ -76,59 +89,115 @@ done < <(git diff "$from_ref" "$to_ref" --numstat)
 
 # Nothing to report. Callers (the prepare-commit-msg hook) treat empty output as
 # "skip the stats block".
-(( ${#code_add} )) || exit 0
+(( ${#seen_team} )) || exit 0
 
 # --- ordering: teams by total lines touched, descending; unowned last --------
+_team_total() {  # _team_total <team>
+  local t=$1 c k
+  local -i sum=0
+  for c in $CLASSES; do
+    k="$c|$t"
+    (( sum += ${add[$k]:-0} + ${del[$k]:-0} ))
+  done
+  print $sum
+}
+
 typeset -a ordered
-for t in ${(k)code_add}; do
+for t in ${(k)seen_team}; do
   [[ $t == $UNOWNED ]] && continue
-  ordered+=("$(( code_add[$t] + code_del[$t] + test_add[$t] + test_del[$t] ))	$t")
+  ordered+=("$(_team_total $t)	$t")
 done
 ordered=(${(f)"$(print -rl -- $ordered | sort -t$'\t' -k1,1nr -k2,2)"})
 typeset -a teams
-for row in $ordered; do teams+=("${row#*$'\t'}"); done
-(( ${+code_add[$UNOWNED]} )) && teams+=("$UNOWNED")
+for row in $ordered; do
+  [[ -n $row ]] && teams+=("${row#*$'\t'}")
+done
+(( ${+seen_team[$UNOWNED]} )) && teams+=("$UNOWNED")
 
 # --- column widths ----------------------------------------------------------
 _fmt_pair() {  # _fmt_pair <added> <deleted> <addw> <delw>
   printf "(%+*d, %*d)" $3 $1 $4 $(( -$2 ))
 }
 
-typeset -i w_team=${#TOTAL_LABEL} w_ca=1 w_cd=1 w_ta=1 w_td=1
+typeset -i w_team=${#TOTAL_LABEL}
 for t in $teams; do
   (( ${#t} > w_team )) && w_team=${#t}
 done
-_w() {  # widest formatted integer across teams + total
+
+_w() {  # widest formatted integer across the values given
   local -i m=1 v
   for v in $@; do (( ${#v} > m )) && m=${#v}; done
   print $m
 }
-w_ca=$(_w ${(v)code_add} $tot_code_add)
-w_cd=$(_w ${(v)code_del} $tot_code_del)
-w_ta=$(_w ${(v)test_add} $tot_test_add)
-w_td=$(_w ${(v)test_del} $tot_test_del)
-# +1 in every column leaves room for the sign printf adds ('+' on additions,
-# '-' on deletions). Without it the rule line is shorter than the widest row.
-(( w_ca++, w_ta++, w_cd++, w_td++ ))
 
-typeset -i w_code=$(( w_ca + w_cd + 4 )) w_test=$(( w_ta + w_td + 4 ))
-
-# --- render -----------------------------------------------------------------
-printf "%-*s  %-*s %-*s\n" $w_team "Team" $w_code "Code" $w_test "Tests"
-printf "%-*s  %-*s %-*s\n" \
-  $w_team "${(l:w_team::-:)}" $w_code "${(l:w_code::-:)}" $w_test "${(l:w_test::-:)}"
-
-for t in $teams; do
-  printf "%-*s  %s %s\n" $w_team "$t" \
-    "$(_fmt_pair ${code_add[$t]} ${code_del[$t]} $w_ca $w_cd)" \
-    "$(_fmt_pair ${test_add[$t]} ${test_del[$t]} $w_ta $w_td)"
+# Per class: added width, deleted width, and the total column width the pair
+# renders to. +1 in every number column leaves room for the sign printf adds
+# ('+' on additions, '-' on deletions). Without it the rule line is shorter than
+# the widest row.
+typeset -A w_add w_del w_col
+for c in $CLASSES; do
+  typeset -a vals_a=() vals_d=()
+  for t in $teams; do
+    k="$c|$t"
+    vals_a+=(${add[$k]:-0})
+    vals_d+=(${del[$k]:-0})
+  done
+  w_add[$c]=$(( $(_w $vals_a ${tot_add[$c]}) + 1 ))
+  w_del[$c]=$(( $(_w $vals_d ${tot_del[$c]}) + 1 ))
+  w_col[$c]=$(( w_add[$c] + w_del[$c] + 4 ))
 done
 
-printf "%-*s  %-*s %-*s\n" \
-  $w_team "${(l:w_team::-:)}" $w_code "${(l:w_code::-:)}" $w_test "${(l:w_test::-:)}"
-printf "%-*s  %s %s\n" $w_team "$TOTAL_LABEL" \
-  "$(_fmt_pair $tot_code_add $tot_code_del $w_ca $w_cd)" \
-  "$(_fmt_pair $tot_test_add $tot_test_del $w_ta $w_td)"
+# --- render -----------------------------------------------------------------
+_rule() {  # the "----  ----- -----" separator, one segment per class
+  local -a segs
+  local c
+  local -i wc
+  for c in $CLASSES; do
+    wc=${w_col[$c]}
+    segs+=("${(l:wc::-:)}")
+  done
+  _row "${(l:w_team::-:)}" $segs
+}
+
+_row() {  # _row <team-cell> <pre-formatted class cells...>
+  local team=$1; shift
+  printf "%-*s  %s\n" $w_team "$team" "${(j: :)@}"
+}
+
+_header() {
+  local -a cells
+  local c
+  local -i wc
+  for c in $CLASSES; do
+    wc=${w_col[$c]}
+    cells+=("$(printf "%-*s" $wc "${CLASS_LABEL[$c]}")")
+  done
+  _row "Team" $cells
+}
+
+_cells_for() {  # _cells_for <team>|--total
+  local t=$1 c k
+  local -a cells
+  for c in $CLASSES; do
+    if [[ $t == --total ]]; then
+      cells+=("$(_fmt_pair ${tot_add[$c]} ${tot_del[$c]} ${w_add[$c]} ${w_del[$c]})")
+    else
+      k="$c|$t"
+      cells+=("$(_fmt_pair ${add[$k]:-0} ${del[$k]:-0} ${w_add[$c]} ${w_del[$c]})")
+    fi
+  done
+  print -rl -- $cells
+}
+
+_header
+_rule
+
+for t in $teams; do
+  _row "$t" ${(f)"$(_cells_for $t)"}
+done
+
+_rule
+_row "$TOTAL_LABEL" ${(f)"$(_cells_for --total)"}
 
 # Only worth saying when it can actually be observed.
 if (( ${#teams} > 1 )); then
