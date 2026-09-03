@@ -1,11 +1,14 @@
 #!/bin/zsh
-# changestats-test.zsh — self-test for changestats.zsh
+# changestats-test.zsh — self-test for changestats.zsh and the diffstats data mode
 #
-# Two layers:
+# Three layers:
 #   1. Table-driven unit assertions for classify_path and the glob translator.
 #   2. A differential test of the glob translator against `git check-ignore`,
 #      which implements gitignore pattern matching natively. CODEOWNERS uses
 #      gitignore syntax, so git is a credible independent oracle.
+#   3. End-to-end assertions on `diffstats --json` against a real repository.
+#      That output is a contract another program parses, so it is pinned here
+#      rather than left to whatever the awk happens to print.
 
 emulate -L zsh
 setopt extended_glob
@@ -223,6 +226,53 @@ check "md override"    "@team-docs"                    "$(codeowners_for app/dom
 # Nothing matches.
 check "unmatched"      ""                              "$(codeowners_for scripts/tool.sh)"
 rm -f $co_fixture
+
+# --------------------------------------------------------------------------
+print -r -- "== diffstats --json (end-to-end) =="
+# The data mode is a contract a downstream tool parses, so it is asserted
+# against a real repository rather than by unit-testing the awk.
+ds=${0:A:h:h}/diffstats
+json_repo=$(mktemp -d "${TMPDIR:-/tmp}/changestats-json-$$-XXXXXX")
+(
+  cd $json_repo
+  git init -q -b main
+  print -r -- seed > seed.txt
+  git add -A
+  git -c user.email=t@t -c user.name=t commit -qm init
+) >/dev/null 2>&1
+
+# An empty diff must still produce a complete object: a consumer parsing "" breaks.
+check "json empty diff" \
+  '{ "code": { "files": 0, "additions": 0, "deletions": 0 }, "test": { "files": 0, "additions": 0, "deletions": 0 }, "support": { "files": 0, "additions": 0, "deletions": 0 }, "generated": { "files": 0, "additions": 0, "deletions": 0 }}' \
+  "$(cd $json_repo && $ds --json main --staged | tr -d '\n' | tr -s ' ')"
+# The bar mode must stay silent on an empty diff: the prepare-commit-msg hook
+# treats empty output as "skip the stats block".
+check "bars empty diff" "" "$(cd $json_repo && $ds main --staged)"
+
+(
+  cd $json_repo
+  mkdir -p tests
+  seq 1 60 > Widget.tsx
+  seq 1 87 > Widget.stories.tsx
+  seq 1 40 > tests/x.py
+  # Binary: counted as a file, contributes no lines.
+  printf '\x89PNG\r\n\x1a\n\x00BIN\x00' > logo.png
+  git add -A
+) >/dev/null 2>&1
+
+check "json populated" \
+  '{ "code": { "files": 2, "additions": 60, "deletions": 0 }, "test": { "files": 1, "additions": 40, "deletions": 0 }, "support": { "files": 1, "additions": 87, "deletions": 0 }, "generated": { "files": 0, "additions": 0, "deletions": 0 }}' \
+  "$(cd $json_repo && $ds --json main --staged | tr -d '\n' | tr -s ' ')"
+
+# `--staged` and `--cached` are real refs, so only `--json` may be read as a
+# flag. It must be accepted in any position.
+a=$(cd $json_repo && $ds --json main --staged)
+b=$(cd $json_repo && $ds main --staged --json)
+c=$(cd $json_repo && $ds main --json --staged)
+check "json flag position (trailing)" "$a" "$b"
+check "json flag position (infix)"    "$a" "$c"
+
+rm -rf $json_repo
 
 # --------------------------------------------------------------------------
 print -r -- ""

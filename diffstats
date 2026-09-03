@@ -1,9 +1,26 @@
 #!/bin/zsh
-# diffstats - Visual git diff statistics
-# Shows code, test, support, and generated changes with axis-aligned visual bars
+# diffstats - git diff statistics by class of change.
+#
+# Two output modes over one set of numbers:
+#   default   axis-aligned visual bars, for a human reading a commit message
+#   --json    per-class {files, additions, deletions}, for a program
+#
+# The data mode exists so a downstream tool does not have to re-implement the
+# classifier to get the same answer. Screen-scraping the bars cannot work: they
+# carry no per-class file count, and their column widths move with the data.
+#
+# Usage: diffstats [--json] [from_ref] [to_ref]
 
-from_ref=${1:-origin/main}
-to_ref=${2:---staged}
+# `--json` is the only flag. Everything else is positional, because `--staged`
+# and `--cached` are legitimate refs and must not be read as options.
+typeset -i json=0
+typeset -a refs=()
+for arg in "$@"; do
+  if [[ $arg == --json ]]; then json=1; else refs+=("$arg"); fi
+done
+
+from_ref=${refs[1]:-origin/main}
+to_ref=${refs[2]:---staged}
 
 # The code/test/support/generated split is shared with teamdiffstats. It used to
 # be an inline regex duplicated in both scripts, and the copies drifted far
@@ -15,19 +32,24 @@ if [[ ! -r $_lib ]]; then
 fi
 source $_lib
 
-# Emit "added <TAB> deleted <TAB> class" so awk only has to total and render.
+# Emit "added <TAB> deleted <TAB> class", one line per file, so awk only has to
+# total and render.
 _classified() {
   local added deleted file
   while read -r added deleted file; do
     [[ -z $file ]] && continue
-    [[ $added == '-' || $deleted == '-' ]] && continue   # binary
+    # Binary files report "-" for both counts. They contribute no lines, but a
+    # reviewer still has to open one, so they are counted as a file rather than
+    # dropped. Zeroing them here keeps the bar totals identical either way.
+    [[ $added == '-' ]] && added=0
+    [[ $deleted == '-' ]] && deleted=0
     print -r -- "$added	$deleted	$(classify_path $file)"
   done < <(git diff "$from_ref" "$to_ref" --numstat)
 }
 
 # One row per class, driven by an array. The previous version hand-unrolled the
 # same twelve lines once per class, so adding a fourth class meant a fourth copy.
-_classified | awk '
+_classified | awk -v json=$json '
 BEGIN {
   add_char="█";
   del_char="▒";
@@ -38,15 +60,26 @@ BEGIN {
   class[2] = "test";      labels[2] = "Tests";
   class[3] = "support";   labels[3] = "Support";
   class[4] = "generated"; labels[4] = "Generated";
-  for (i = 1; i <= n; i++) { add[i] = 0; del[i] = 0; slot[class[i]] = i }
+  for (i = 1; i <= n; i++) { add[i] = 0; del[i] = 0; files[i] = 0; slot[class[i]] = i }
 }
 {
   # An unrecognised class reads as code, matching the fallback in classify_path:
   # if we cannot tell, assume a human has to read it.
   i = ($3 in slot) ? slot[$3] : slot["code"];
-  add[i] += $1; del[i] += $2;
+  add[i] += $1; del[i] += $2; files[i] += 1;
 }
 END {
+  # Data mode always emits a complete object, including for an empty diff. A
+  # consumer parsing "" would break, and "no changes" is a real answer.
+  if (json) {
+    printf("{\n");
+    for (i = 1; i <= n; i++)
+      printf("  \"%s\": { \"files\": %d, \"additions\": %d, \"deletions\": %d }%s\n",
+             class[i], files[i], add[i], del[i], (i < n ? "," : ""));
+    printf("}\n");
+    exit 0;
+  }
+
   # Scale every bar against one range, so the rows are comparable to each other.
   max_add = 0; max_del = 0;
   for (i = 1; i <= n; i++) {

@@ -7,7 +7,7 @@ required reviewer on this PR — how much of it is actually mine?*
 
 | Command | Answers |
 | --- | --- |
-| `diffstats` | How much of this diff is code, tests, support, generated? |
+| `diffstats` | How much of this diff is code, tests, support, generated? (`--json` for a data mode) |
 | `teamdiffstats` | How many lines does each owning team have? |
 | `teamdifffiles` | Which specific files does each owning team have? |
 
@@ -30,6 +30,36 @@ acme-org/team-alpha     (+414,  0) (+274,  0) ( +97,  0)
 ----------------------  ---------- ---------- ----------
 TOTAL (each line once)  (+565, -1) (+280,  0) (+113,  0)
 ```
+
+## Data mode
+
+`diffstats --json` prints the same numbers as a contract another program can
+consume, so a downstream tool does not have to re-implement the classifier to
+get the same answer:
+
+```console
+$ diffstats --json origin/main HEAD
+{
+  "code": { "files": 2, "additions": 60, "deletions": 0 },
+  "test": { "files": 1, "additions": 40, "deletions": 0 },
+  "support": { "files": 1, "additions": 87, "deletions": 0 },
+  "generated": { "files": 0, "additions": 0, "deletions": 0 }
+}
+```
+
+Scraping the bar chart instead does not work, and the difference matters: the
+bars carry no per-class **file** count, and their column widths move with the
+data. A consumer that gates on "how many production files does this touch"
+cannot get that number from the rendered output.
+
+Three properties the tests pin, because a parser depends on them:
+
+- **An empty diff still emits a complete object**, all zeros. Only the bar mode
+  goes silent, because the commit hook treats empty output as "skip the block".
+- **Binary files count toward `files` but contribute no lines.** A reviewer
+  still has to open one.
+- **`--json` is the only flag**, accepted in any position. Everything else is
+  positional, because `--staged` and `--cached` are legitimate refs.
 
 ## The ownership model
 
@@ -55,10 +85,11 @@ with `git diff --numstat`.
 
 ```console
 $ zsh lib/changestats-test.zsh
-PASS=336 FAIL=0
+PASS=341 FAIL=0
 ```
 
-336 assertions covering classification, pattern translation, and precedence.
+341 assertions covering classification, pattern translation, precedence, and the
+`--json` contract.
 252 of them are differential tests against `git check-ignore`, which implements
 gitignore matching natively and serves as an independent oracle — scoped to
 patterns without a trailing wildcard, where the two standards agree.
